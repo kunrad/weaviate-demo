@@ -17,6 +17,14 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
+# Configure sending Alerts
+def send_alert(message):
+    """
+    Simulate sending an alert (e.g., email or Slack).
+    In a production system, replace this with an actual notification service.
+    """
+    logging.info(f"ALERT: {message}")
+    
 async def fetch_health(session: ClientSession, url: str):
     try:
         start_time = time.perf_counter()
@@ -25,14 +33,16 @@ async def fetch_health(session: ClientSession, url: str):
             response_time = time.perf_counter() - start_time
             status = response.status
             text = await response.text()
-            logging.info(f"Endpoint: {HEALTH_ENDPOINTS}, Response Time: {response_time:.2f}s, Status Code: {status}")
-            
+            info_message=(f"Endpoint: {HEALTH_ENDPOINTS}, Response Time: {response_time:.2f}s, Status Code: {status}")
+            logging.info(info_message)
+            send_alert(info_message)
             # Optionally check Json Health Indicator for ok status
             try: 
                 data = json.loads(text)
                 if data.get('db_status', '').lower() != 'ok':
                     error_message = f"Database connectivity issue detected at {url}"
                     logging.error(error_message)
+                    send_alert(error_message)
             except json.JSONDecodeError:
                 logging.warning(f"Response from {url} is not valid JSON")
                 
@@ -40,16 +50,20 @@ async def fetch_health(session: ClientSession, url: str):
             if response_time > RESPONSE_THRESHOLD:
                 warning_message = f"Response time {response_time:.2f}s at {url} exceeds threshold {RESPONSE_THRESHOLD}s"
                 logging.warning(warning_message)
+                send_alert(warning_message)
             
             if status != 200:
                 error_message = f"HTTP Error at {url}: Received status code {status}"
                 logging.error(error_message)
+                send_alert(error_message)
     except asyncio.TimeoutError:
         error_message = f"HTTP Error at {url}:"
         logging.error(error_message)
+        send_alert(error_message)
     except Exception as e:
         error_message = f"Request error for {url}: {e}"
         logging.error(error_message)
+        send_alert(error_message)
         
 async def health_check():
     async with ClientSession() as session:
