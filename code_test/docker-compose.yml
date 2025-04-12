@@ -1,24 +1,25 @@
-version: '3.8'
-services:
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile.app
-    ports:
-      - "8000:8000"
-    environment:
-      - FLASK_ENV=development
+version: "3"
 
-  healthcheck:
-    build:
-      context: .
-      dockerfile: Dockerfile
+services:
+  web:
+    build: .
+    ports:
+      - '8000:8000'
+    command: python health.py
+    healthcheck:
+      test: [CMD, curl, -f, http://localhost:8000/health]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  health_checker:
+    build: .
     depends_on:
-      - app
+      - web
     environment:
-      # Use the service name "app" to reach the Flask container
-      - HEALTH_ENDPOINT=http://app:8000/health
+      - HEALTH_ENDPOINT=http://web:8000/health
       - CHECK_INTERVAL=60
       - RESPONSE_THRESHOLD=3.0
       - RETRY_COUNT=3
       - RETRY_DELAY=2.0
+    command: python health_check.py

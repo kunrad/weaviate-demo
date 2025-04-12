@@ -1,105 +1,149 @@
+import json
+import logging
 import os
 import time
-import logging
+from dataclasses import dataclass
+from typing import Dict, Optional
+
 import requests
-import json
 from requests.exceptions import RequestException
 
-# Configuration via environment variables with defaults
-HEALTH_ENDPOINT = os.environ.get('HEALTH_ENDPOINT', 'http://localhost:8000/health')
-CHECK_INTERVAL = int(os.environ.get('CHECK_INTERVAL', 100))  # in seconds (default: 5 minutes)
-RESPONSE_THRESHOLD = float(os.environ.get('RESPONSE_THRESHOLD', 3.0))  # in seconds
-RETRY_COUNT = int(os.environ.get('RETRY_COUNT', 3))
-RETRY_DELAY = float(os.environ.get('RETRY_DELAY', 2.0))  # seconds between retries
 
-# Configure logging to output timestamp, level, and message
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+@dataclass
+class HealthCheckConfig:
+    endpoint: str = os.environ.get("HEALTH_ENDPOINT", "http://localhost:8000/health")
+    check_interval: int = int(os.environ.get("CHECK_INTERVAL", "60"))
+    response_threshold: float = float(os.environ.get("RESPONSE_THRESHOLD", "3.0"))
+    retry_count: int = int(os.environ.get("RETRY_COUNT", "3"))
+    retry_delay: float = float(os.environ.get("RETRY_DELAY", "2.0"))
 
-def send_alert(message):
-    """
-    Simulate sending an alert (e.g., email or Slack).
-    In a production system, replace this with an actual notification service.
-    """
-    logging.info(f"ALERT: {message}")
-        
-def check_health_check(response, response_time):
-    """
-    Perform a single health check request.
-    Measures response time, checks HTTP status, and optionally inspects JSON health indicators.
-    """
-    
-    try:
-        start_time = time.perf_counter()
-        response = requests.get(HEALTH_ENDPOINT, timeout=RESPONSE_THRESHOLD + 1)
-        response_time = time.perf_counter() - start_time
 
-        # Log basic health check info
-        logging.info(f"Endpoint: {HEALTH_ENDPOINT}, Response Time: {response_time:.2f}s, Status Code: {response.status_code}")
+@dataclass
+class HealthCheckResult:
+    timestamp: float
+    response_time: float
+    status_code: int
+    is_healthy: bool
+    system_stats: Optional[Dict[str, float]] = None
+    error_message: Optional[str] = None
 
-        # Check if the response time exceeds the threshold
-        if response_time > RESPONSE_THRESHOLD:
-            warning_message = f"Response time {response_time:.2f}s exceeds threshold of {RESPONSE_THRESHOLD}s"
-            logging.warning(warning_message)
-            send_alert(warning_message)
 
-        # Check if the HTTP status code indicates an error
-        if response.status_code != 200:
-            error_message = f"HTTP Error: Received status code {response.status_code}"
-            logging.error(error_message)
-            send_alert(error_message)
+class HealthChecker:
+    def __init__(self, config: HealthCheckConfig):
+        self.config = config
+        self.setup_logging()
+        self.session = requests.Session()
 
-        # Optionally, inspect the response body if JSON is returned
+    def setup_logging(self):
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+            handlers=[logging.StreamHandler(), logging.FileHandler("health_check.log")],
+        )
+        self.logger = logging.getLogger(__name__)
+
+    def send_alert(self, message: str, level: str = "warning"):
+        """
+        Send alerts through configured channels (e.g., email, Slack, etc.)
+        """
+        getattr(self.logger, level)(f"ALERT: {message}")
+        # Add actual alert implementation here (e.g., Slack webhook, email)
+
+    def check_health(self) -> HealthCheckResult:
         try:
-            health_data = response.json()
-            # Example: Check a 'db_status' field in the JSON response
-            if 'db_status' in health_data and health_data['db_status'].lower() != 'ok':
-                error_message = "Database connectivity issue detected in health check"
-                logging.error(error_message)
-                send_alert(error_message)
-        except json.JSONDecodeError:
-            # Response was not JSON formatted; skip parsing.
-            pass
+            start_time = time.perf_counter()
+            response = self.session.get(
+                self.config.endpoint, timeout=self.config.response_threshold + 1
+            )
+            response_time = time.perf_counter() - start_time
 
-    except RequestException as e:
-        error_message = f"Request failed: {e}"
-        logging.error(error_message)
-        send_alert(error_message)
+            result = HealthCheckResult(
+                timestamp=time.time(),
+                response_time=response_time,
+                status_code=response.status_code,
+                is_healthy=True,
+            )
 
-def perform_health_check(session):
-    """
-    Perform a single health check request and evaluate the response
-    """
-    try:
-        start_time = time.perf_counter()
-        response = session.get(HEALTH_ENDPOINT, timeout=RESPONSE_THRESHOLD + 1)
-        response_time = time.perf_counter() - start_time
-        check_health_check(response, response_time)
-    except RequestException as e:
-        error_message = f"Request failed: {e}"
-        logging.error(error_message)
-        send_alert(error_message)
-        
-def health_check_loop():
-    """
-    Runs the health check repeatedly at the configured interval.
-    Implements a retry mechanism for transient failures.
-    """
-    with requests.Session() as session:
+            # Check response time threshold
+            if response_time > self.config.response_threshold:
+                result.is_healthy = False
+                result.error_message = (
+                    f"Response time ({response_time:.2f}s) exceeds threshold"
+                )
+                self.send_alert(result.error_message)
+
+            # Check HTTP status
+            if response.status_code != 200:
+                result.is_healthy = False
+                result.error_message = f"Unhealthy status code: {response.status_code}"
+                self.send_alert(result.error_message, "error")
+
+            # Parse and check health data
+            try:
+                health_data = response.json()
+                result.system_stats = health_data.get("system_stats")
+
+                if health_data.get("db_status", "").lower() != "ok":
+                    result.is_healthy = False
+                    result.error_message = "Database health check failed"
+                    self.send_alert(result.error_message, "error")
+
+                # Alert on high resource usage
+                if result.system_stats:
+                    if result.system_stats.get("cpu_percent", 0) > 90:
+                        self.send_alert("High CPU usage detected")
+                    if result.system_stats.get("memory_percent", 0) > 90:
+                        self.send_alert("High memory usage detected")
+                    if result.system_stats.get("disk_usage", 0) > 90:
+                        self.send_alert("High disk usage detected")
+
+            except json.JSONDecodeError:
+                self.logger.warning("Invalid JSON response from health endpoint")
+
+            return result
+
+        except RequestException as e:
+            return HealthCheckResult(
+                timestamp=time.time(),
+                response_time=-1,
+                status_code=-1,
+                is_healthy=False,
+                error_message=str(e),
+            )
+
+    def run(self):
+        self.logger.info(f"Starting health checker for {self.config.endpoint}")
+
         while True:
-            for attempt in range(1, RETRY_COUNT + 1):
+            for attempt in range(self.config.retry_count):
                 try:
-                    perform_health_check(session)
-                    break  # Exit retry loop if successful
-                except Exception as e:
-                    logging.error(f"Attempt {attempt}/{RETRY_COUNT} failed: {e}")
-                    if attempt < RETRY_COUNT:
-                        time.sleep(RETRY_DELAY)
+                    result = self.check_health()
+
+                    if result.is_healthy:
+                        self.logger.info(
+                            f"Health check passed - Response Time: {result.response_time:.2f}s, "
+                            f"Status: {result.status_code}"
+                        )
+                        break
                     else:
-                        send_alert(f"Health check failed after {RETRY_COUNT} attempts")
-            time.sleep(CHECK_INTERVAL)
-                    
-if __name__ == '__main__':
-    health_check_loop()
+                        self.logger.warning(
+                            f"Health check failed - {result.error_message}"
+                        )
+
+                except Exception as e:
+                    self.logger.error(f"Health check error: {e}")
+                    if attempt < self.config.retry_count - 1:
+                        time.sleep(self.config.retry_delay)
+                    else:
+                        self.send_alert(
+                            f"Health check failed after {self.config.retry_count} attempts",
+                            "error",
+                        )
+
+            time.sleep(self.config.check_interval)
+
+
+if __name__ == "__main__":
+    config = HealthCheckConfig()
+    checker = HealthChecker(config)
+    checker.run()
